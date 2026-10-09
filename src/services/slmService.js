@@ -31,6 +31,9 @@ export const PROVIDERS = ['ollama-compatible', 'openai-compatible'];
 const NON_CHAT_MODEL = /prompt-guard|llama-guard|whisper|orpheus|embed|moderation/i;
 export const isNonChatModel = (model) => NON_CHAT_MODEL.test(String(model));
 
+// A provider keyword pasted into SLM_MODEL (values swapped between variables) is never a valid model id.
+export const isProviderNameAsModel = (model) => /^(ollama|openai)-compatible$/i.test(String(model).trim());
+
 // An OpenAI-style base URL (…/v1, or a well-known host) combined with the Ollama provider is a misconfiguration.
 export const looksOpenAiStyle = (baseUrl) =>
   /\/v1\/?$|groq\.com|openrouter\.ai|api\.openai\.com|together\.xyz|fireworks\.ai/i.test(String(baseUrl ?? ''));
@@ -56,6 +59,13 @@ function requireConfigured(slm) {
   }
   if (!PROVIDERS.includes(slm.provider)) {
     throw new AppError('SLM_NOT_CONFIGURED', `Unsupported SLM_PROVIDER "${slm.provider}". Use one of: ${PROVIDERS.join(', ')}.`, 503);
+  }
+  if (isProviderNameAsModel(slm.model)) {
+    throw new AppError(
+      'SLM_NOT_CONFIGURED',
+      `SLM_MODEL is set to "${slm.model}", which is a provider name. Set SLM_PROVIDER to that value and SLM_MODEL to a real model id (e.g. openai/gpt-oss-120b).`,
+      503,
+    );
   }
   if (isNonChatModel(slm.model)) {
     throw new AppError(

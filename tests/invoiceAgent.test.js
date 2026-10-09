@@ -289,3 +289,10 @@ test('health warnings flag provider/URL mismatch and non-chat models', async () 
   assert.ok(s.warnings.some((w) => /openai-compatible/.test(w)));
   assert.ok(s.warnings.some((w) => /not a chat model/.test(w)));
 });
+
+test('provider name pasted into SLM_MODEL is called out explicitly (config and runtime)', async () => {
+  const { configStatus, getConfig } = await import('../src/config/env.js');
+  const cfg = makeConfig({ SLM_MODEL: 'openai-compatible', SLM_BASE_URL: 'https://api.groq.com/openai/v1' });
+  assert.ok(configStatus(getConfig({ ...baseEnv, SLM_MODEL: 'openai-compatible' })).warnings.some((w) => /look swapped/.test(w)));
+  await assert.rejects(extractInvoiceData(TEXT, cfg.slm, { fetchImpl: async () => assert.fail('no network') }), (e) => e.code === 'SLM_NOT_CONFIGURED' && /provider name/.test(e.message));
+});

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { AppError } from '../utils/errors.js';
-import { isNonChatModel, looksOpenAiStyle } from '../services/slmService.js';
+import { isNonChatModel, isProviderNameAsModel, looksOpenAiStyle } from '../services/slmService.js';
 
 const bool = z
   .string()
@@ -91,7 +91,9 @@ export function configStatus(config) {
   if (slmConfigured && config.slm.provider === 'ollama-compatible' && looksOpenAiStyle(config.slm.baseUrl)) {
     warnings.push('SLM_BASE_URL looks like an OpenAI-style API but SLM_PROVIDER is ollama-compatible; set SLM_PROVIDER=openai-compatible.');
   }
-  if (isNonChatModel(config.slm.model)) {
+  if (isProviderNameAsModel(config.slm.model)) {
+    warnings.push(`SLM_MODEL is "${config.slm.model}", which is a provider name: SLM_PROVIDER and SLM_MODEL look swapped.`);
+  } else if (isNonChatModel(config.slm.model)) {
     warnings.push(`SLM_MODEL "${config.slm.model}" is not a chat model and cannot extract invoice data.`);
   }
   if (config.isProduction && !config.API_KEY) warnings.push('API_KEY is not set; the API will refuse requests.');
