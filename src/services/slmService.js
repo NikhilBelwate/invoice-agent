@@ -27,6 +27,25 @@ Rules:
 
 export const PROVIDERS = ['ollama-compatible', 'openai-compatible'];
 
+// Model families that are not chat/instruct models (classifiers, speech, embeddings) and can never extract invoice data.
+const NON_CHAT_MODEL = /prompt-guard|llama-guard|whisper|orpheus|embed|moderation/i;
+export const isNonChatModel = (model) => NON_CHAT_MODEL.test(String(model));
+
+// An OpenAI-style base URL (…/v1, or a well-known host) combined with the Ollama provider is a misconfiguration.
+export const looksOpenAiStyle = (baseUrl) =>
+  /\/v1\/?$|groq\.com|openrouter\.ai|api\.openai\.com|together\.xyz|fireworks\.ai/i.test(String(baseUrl ?? ''));
+
+/** Short, single-line provider error text (OpenAI-style {error:{message}} or Ollama {error:"..."}); never includes request data. */
+async function providerReason(res) {
+  try {
+    const j = await res.clone().json();
+    const msg = typeof j?.error === 'string' ? j.error : j?.error?.message;
+    return typeof msg === 'string' ? msg.replace(/\s+/g, ' ').slice(0, 200) : '';
+  } catch {
+    return '';
+  }
+}
+
 function requireConfigured(slm) {
   if (!slm.baseUrl) {
     throw new AppError(
@@ -37,6 +56,13 @@ function requireConfigured(slm) {
   }
   if (!PROVIDERS.includes(slm.provider)) {
     throw new AppError('SLM_NOT_CONFIGURED', `Unsupported SLM_PROVIDER "${slm.provider}". Use one of: ${PROVIDERS.join(', ')}.`, 503);
+  }
+  if (isNonChatModel(slm.model)) {
+    throw new AppError(
+      'SLM_NOT_CONFIGURED',
+      `SLM_MODEL "${slm.model}" is a classifier/speech/embedding model, not a chat model, and cannot extract invoice data. Choose a chat model (list them with GET {SLM_BASE_URL}/models).`,
+      503,
+    );
   }
 }
 
@@ -114,10 +140,15 @@ ${inputText}
     throw new AppError('SLM_UNAVAILABLE', 'The language model endpoint rejected the configured credentials.', 502);
   }
   if (res.status === 404) {
-    throw new AppError('SLM_UNAVAILABLE', `The language model endpoint does not serve model "${slm.model}".`, 502);
+    const hint =
+      slm.provider === 'ollama-compatible' && looksOpenAiStyle(slm.baseUrl)
+        ? ' SLM_BASE_URL looks like an OpenAI-style API: set SLM_PROVIDER=openai-compatible.'
+        : '';
+    throw new AppError('SLM_UNAVAILABLE', `The language model endpoint does not serve model "${slm.model}" at this API path.${hint}`, 502);
   }
   if (!res.ok) {
-    throw new AppError('SLM_UNAVAILABLE', `The language model endpoint returned an error (HTTP ${res.status}).`, 502);
+    const reason = await providerReason(res);
+    throw new AppError('SLM_UNAVAILABLE', `The language model endpoint returned an error (HTTP ${res.status})${reason ? ': ' + reason : ''}.`, 502);
   }
 
   let payload;

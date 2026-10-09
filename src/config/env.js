@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { AppError } from '../utils/errors.js';
+import { isNonChatModel, looksOpenAiStyle } from '../services/slmService.js';
 
 const bool = z
   .string()
@@ -86,6 +87,12 @@ export function configStatus(config) {
   const warnings = [];
   if (config.isProduction && slmConfigured && isLocalUrl(config.slm.baseUrl)) {
     warnings.push('SLM_BASE_URL points to a local address, which is unreachable from Vercel.');
+  }
+  if (slmConfigured && config.slm.provider === 'ollama-compatible' && looksOpenAiStyle(config.slm.baseUrl)) {
+    warnings.push('SLM_BASE_URL looks like an OpenAI-style API but SLM_PROVIDER is ollama-compatible; set SLM_PROVIDER=openai-compatible.');
+  }
+  if (isNonChatModel(config.slm.model)) {
+    warnings.push(`SLM_MODEL "${config.slm.model}" is not a chat model and cannot extract invoice data.`);
   }
   if (config.isProduction && !config.API_KEY) warnings.push('API_KEY is not set; the API will refuse requests.');
   if (!config.upstash) warnings.push('Upstash Redis not configured; rate limiting and idempotency are per-instance only.');

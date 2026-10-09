@@ -5,7 +5,7 @@ import { extractInvoiceData } from '../src/services/slmService.js';
 import { generateInvoicePdf } from '../src/services/pdfService.js';
 import { sendInvoiceEmail } from '../src/services/emailService.js';
 import { AppError } from '../src/utils/errors.js';
-import { makeConfig, newStore, structuredBody, fakeDeps } from './helpers.js';
+import { baseEnv, makeConfig, newStore, structuredBody, fakeDeps } from './helpers.js';
 
 const config = makeConfig();
 const run = (body, opts = {}) => processInvoiceRequest(body, { config, ...opts });
@@ -256,4 +256,36 @@ test('openai-compatible: retries once without response_format on HTTP 400', asyn
 
 test('unknown SLM_PROVIDER => SLM_NOT_CONFIGURED', async () => {
   await assert.rejects(extractInvoiceData(TEXT, { ...openaiCfg.slm, provider: 'carrier-pigeon' }), (e) => e.code === 'SLM_NOT_CONFIGURED');
+});
+
+// ---- Misconfiguration diagnostics ---------------------------------------------------------------
+test('ollama provider against an OpenAI-style base URL: 404 error tells the operator to switch provider', async () => {
+  const cfg = makeConfig({ SLM_BASE_URL: 'https://api.groq.com/openai/v1' });
+  await assert.rejects(
+    extractInvoiceData(TEXT, cfg.slm, { fetchImpl: async () => new Response('{}', { status: 404 }) }),
+    (e) => e.code === 'SLM_UNAVAILABLE' && /SLM_PROVIDER=openai-compatible/.test(e.message),
+  );
+});
+
+test('classifier / non-chat models are rejected before any network call', async () => {
+  const never = async () => assert.fail('fetch must not be called');
+  for (const model of ['meta-llama/llama-prompt-guard-2-86m', 'whisper-large-v3', 'meta-llama/Llama-Guard-4-12B']) {
+    const cfg = makeConfig({ SLM_PROVIDER: 'openai-compatible', SLM_MODEL: model });
+    await assert.rejects(extractInvoiceData(TEXT, cfg.slm, { fetchImpl: never }), (e) => e.code === 'SLM_NOT_CONFIGURED' && /not a chat model/.test(e.message), model);
+  }
+});
+
+test('provider error reason is surfaced (single line, truncated) on HTTP errors', async () => {
+  const body = JSON.stringify({ error: { message: 'model\n  decommissioned ' + 'x'.repeat(500), type: 'invalid_request_error' } });
+  await assert.rejects(
+    extractInvoiceData(TEXT, openaiCfg.slm, { fetchImpl: async () => new Response(body, { status: 410 }) }),
+    (e) => e.code === 'SLM_UNAVAILABLE' && /HTTP 410\): model decommissioned/.test(e.message) && e.message.length < 300 && !e.message.includes('\n'),
+  );
+});
+
+test('health warnings flag provider/URL mismatch and non-chat models', async () => {
+  const { configStatus, getConfig } = await import('../src/config/env.js');
+  const s = configStatus(getConfig({ ...baseEnv, SLM_BASE_URL: 'https://api.groq.com/openai/v1', SLM_MODEL: 'meta-llama/llama-prompt-guard-2-86m' }));
+  assert.ok(s.warnings.some((w) => /openai-compatible/.test(w)));
+  assert.ok(s.warnings.some((w) => /not a chat model/.test(w)));
 });

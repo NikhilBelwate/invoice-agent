@@ -76,7 +76,7 @@ Or use Dashboard → Project → Settings → Environment Variables and tick the
 The app only needs `POST {SLM_BASE_URL}/api/chat` (Ollama chat API) and, for `/api/health?deep=1`, `GET {SLM_BASE_URL}/api/tags`.
 
 * **Own server (simplest):** on a VM, `ollama pull gemma3:4b`, run Ollama bound to localhost, and put a TLS reverse proxy in front (Caddy/nginx) that requires `Authorization: Bearer <token>`. Set `SLM_BASE_URL=https://your-host` and `SLM_API_KEY=<token>`. A 4B model runs on CPU but is slow; budget ~5–15 s per request and keep `SLM_TIMEOUT_MS` comfortably under the function limit.
-* **Hosted provider (OpenAI-style API):** set `SLM_PROVIDER=openai-compatible`, `SLM_BASE_URL=<provider base incl. /v1>`, `SLM_MODEL=<provider's exact model id>` and `SLM_API_KEY`. The app requests JSON mode and retries once without it if the provider rejects `response_format`. The app never substitutes a different model than the one configured.
+* **Hosted provider (OpenAI-style API):** set `SLM_PROVIDER=openai-compatible`, `SLM_BASE_URL=<provider base incl. /v1>`, `SLM_MODEL=<provider's exact model id>` and `SLM_API_KEY`. The app requests JSON mode and retries once without it if the provider rejects `response_format`. The app never substitutes a different model than the one configured. Example (Groq): `SLM_PROVIDER=openai-compatible`, `SLM_BASE_URL=https://api.groq.com/openai/v1`, `SLM_MODEL=openai/gpt-oss-20b`. Groq's catalog changes (Gemma may not be offered): list what your key can use with `GET https://api.groq.com/openai/v1/models` and avoid `*-guard-*` / `whisper-*` models.
 * If the endpoint is down/unconfigured the API returns a clear `SLM_*` error; it never falls back to a different model.
 
 ## 5. API
@@ -259,6 +259,7 @@ vercel --prod                # production deployment
 |---|---|
 | 503 `CONFIG_ERROR` "authentication is not configured" | `API_KEY` missing in a production deployment (redeploy after adding it) |
 | 503 `SLM_NOT_CONFIGURED` | `SLM_BASE_URL` empty. Health shows `slm.configured:false` |
+| 503 `SLM_NOT_CONFIGURED` "not a chat model" | `SLM_MODEL` is a classifier/speech/embedding model (e.g. `llama-prompt-guard-*`, `llama-guard-*`, `whisper-*`). Pick a chat model from `GET {SLM_BASE_URL}/models` |
 | 502 `SLM_UNAVAILABLE` "does not serve model" (HTTP 404) | Wrong API style: an OpenAI-style host (Groq, OpenRouter, ...) needs `SLM_PROVIDER=openai-compatible` and a base URL ending in `/v1`; or the model id is wrong/retired |
 | 502 `SLM_UNAVAILABLE` | Endpoint unreachable from Vercel (localhost/private IP/firewall), wrong token, or model not pulled (`ollama pull gemma3:4b`). Run `/api/health?deep=1` |
 | 504 `SLM_TIMEOUT` | Cold model load or CPU inference; keep model warm (`OLLAMA_KEEP_ALIVE=24h`) or raise `SLM_TIMEOUT_MS` (≤ 50000) |
