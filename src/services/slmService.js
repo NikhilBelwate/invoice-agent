@@ -25,6 +25,8 @@ Rules:
 - Do NOT calculate totals yourself. Only copy subtotal/taxAmount/grandTotal if the text states them.
 - Do not include the instruction to email or generate the invoice as notes.`;
 
+export const PROVIDERS = ['ollama-compatible', 'openai-compatible'];
+
 function requireConfigured(slm) {
   if (!slm.baseUrl) {
     throw new AppError(
@@ -33,8 +35,8 @@ function requireConfigured(slm) {
       503,
     );
   }
-  if (slm.provider !== 'ollama-compatible') {
-    throw new AppError('SLM_NOT_CONFIGURED', `Unsupported SLM_PROVIDER "${slm.provider}". Only "ollama-compatible" is supported.`, 503);
+  if (!PROVIDERS.includes(slm.provider)) {
+    throw new AppError('SLM_NOT_CONFIGURED', `Unsupported SLM_PROVIDER "${slm.provider}". Use one of: ${PROVIDERS.join(', ')}.`, 503);
   }
 }
 
@@ -80,25 +82,33 @@ function parseModelJson(content) {
 export async function extractInvoiceData(inputText, slm, { fetchImpl = fetch } = {}) {
   requireConfigured(slm);
 
-  const res = await callProvider(
-    slm,
-    '/api/chat',
-    {
-      method: 'POST',
-      headers: headers(slm),
-      body: JSON.stringify({
-        model: slm.model,
-        stream: false,
-        format: 'json',
-        options: { temperature: 0 },
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: `Checkout text:\n"""\n${inputText}\n"""` },
-        ],
-      }),
-    },
-    fetchImpl,
-  );
+  const messages = [
+    { role: 'system', content: SYSTEM_PROMPT },
+    { role: 'user', content: `Checkout text:
+"""
+${inputText}
+"""` },
+  ];
+  const openai = slm.provider === 'openai-compatible';
+  const send = (jsonMode) =>
+    callProvider(
+      slm,
+      openai ? '/chat/completions' : '/api/chat',
+      {
+        method: 'POST',
+        headers: headers(slm),
+        body: JSON.stringify(
+          openai
+            ? { model: slm.model, temperature: 0, messages, ...(jsonMode ? { response_format: { type: 'json_object' } } : {}) }
+            : { model: slm.model, stream: false, format: 'json', options: { temperature: 0 }, messages },
+        ),
+      },
+      fetchImpl,
+    );
+
+  let res = await send(true);
+  // Some OpenAI-compatible hosts reject response_format for certain models: retry once without it.
+  if (openai && res.status === 400) res = await send(false);
 
   if (res.status === 401 || res.status === 403) {
     throw new AppError('SLM_UNAVAILABLE', 'The language model endpoint rejected the configured credentials.', 502);
@@ -117,7 +127,7 @@ export async function extractInvoiceData(inputText, slm, { fetchImpl = fetch } =
     throw new AppError('SLM_BAD_RESPONSE', 'The language model returned an unreadable response.', 502);
   }
 
-  const raw = parseModelJson(payload?.message?.content ?? payload?.response);
+  const raw = parseModelJson(payload?.choices?.[0]?.message?.content ?? payload?.message?.content ?? payload?.response);
   if (!raw) {
     throw new AppError('SLM_BAD_RESPONSE', 'The language model did not return valid JSON.', 502);
   }
@@ -138,10 +148,11 @@ export async function extractInvoiceData(inputText, slm, { fetchImpl = fetch } =
 /** Lightweight reachability check used by /api/health?deep=1. */
 export async function pingSlm(slm, { fetchImpl = fetch } = {}) {
   requireConfigured(slm);
-  const res = await callProvider(slm, '/api/tags', { method: 'GET', headers: headers(slm) }, fetchImpl);
+  const openai = slm.provider === 'openai-compatible';
+  const res = await callProvider(slm, openai ? '/models' : '/api/tags', { method: 'GET', headers: headers(slm) }, fetchImpl);
   if (!res.ok) throw new AppError('SLM_UNAVAILABLE', `The language model endpoint returned HTTP ${res.status}.`, 502);
   const body = await res.json().catch(() => ({}));
-  const names = (body.models ?? []).map((m) => m.name ?? m.model);
-  const base = slm.model.includes(':') ? slm.model : `${slm.model}:latest`;
+  const names = openai ? (body.data ?? []).map((m) => m.id) : (body.models ?? []).map((m) => m.name ?? m.model);
+  const base = !openai && !slm.model.includes(':') ? `${slm.model}:latest` : slm.model;
   return { reachable: true, modelAvailable: names.includes(slm.model) || names.includes(base) };
 }

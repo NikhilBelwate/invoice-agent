@@ -46,9 +46,9 @@ npm run dev               # = vercel dev  (serves http://localhost:3000/api/...)
 | `SMTP_HOST`, `SMTP_USER`, `SMTP_PASS`, `EMAIL_FROM` | **Yes** | — | SMTP submission |
 | `SMTP_PORT` / `SMTP_SECURE` | No | `587` / `false` | Use `465` + `true` for implicit TLS |
 | `API_KEY` | **Yes in production** | — | Clients send `x-api-key`. Unset in production ⇒ API returns 503 (fails closed). Generate: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
-| `SLM_BASE_URL` | Yes for text input | — | e.g. `https://ollama.example.com` (no trailing path) |
+| `SLM_BASE_URL` | Yes for text input | — | Ollama: `https://ollama.example.com`. OpenAI-compatible: include the version path, e.g. `https://api.groq.com/openai/v1` |
 | `SLM_MODEL` | No | `gemma3:4b` | Model identifier sent to the provider |
-| `SLM_PROVIDER` | No | `ollama-compatible` | Only value supported |
+| `SLM_PROVIDER` | No | `ollama-compatible` | `ollama-compatible` (calls `{base}/api/chat`) or `openai-compatible` (calls `{base}/chat/completions`; e.g. Groq, OpenRouter, Together, vLLM) |
 | `SLM_API_KEY` | If your endpoint needs it | — | Sent as `Authorization: Bearer ...`; never returned to clients |
 | `SLM_TIMEOUT_MS` | No | `20000` | Model call timeout (1000–50000) |
 | `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` | Recommended | — | Shared state for rate limits + idempotency |
@@ -76,7 +76,7 @@ Or use Dashboard → Project → Settings → Environment Variables and tick the
 The app only needs `POST {SLM_BASE_URL}/api/chat` (Ollama chat API) and, for `/api/health?deep=1`, `GET {SLM_BASE_URL}/api/tags`.
 
 * **Own server (simplest):** on a VM, `ollama pull gemma3:4b`, run Ollama bound to localhost, and put a TLS reverse proxy in front (Caddy/nginx) that requires `Authorization: Bearer <token>`. Set `SLM_BASE_URL=https://your-host` and `SLM_API_KEY=<token>`. A 4B model runs on CPU but is slow; budget ~5–15 s per request and keep `SLM_TIMEOUT_MS` comfortably under the function limit.
-* **Hosted provider:** any provider exposing an Ollama-compatible `/api/chat` for `gemma3:4b`. If a provider only offers an OpenAI-style API, `slmService.js` needs an adapter (not included) — the app will not silently substitute another model.
+* **Hosted provider (OpenAI-style API):** set `SLM_PROVIDER=openai-compatible`, `SLM_BASE_URL=<provider base incl. /v1>`, `SLM_MODEL=<provider's exact model id>` and `SLM_API_KEY`. The app requests JSON mode and retries once without it if the provider rejects `response_format`. The app never substitutes a different model than the one configured.
 * If the endpoint is down/unconfigured the API returns a clear `SLM_*` error; it never falls back to a different model.
 
 ## 5. API
@@ -259,6 +259,7 @@ vercel --prod                # production deployment
 |---|---|
 | 503 `CONFIG_ERROR` "authentication is not configured" | `API_KEY` missing in a production deployment (redeploy after adding it) |
 | 503 `SLM_NOT_CONFIGURED` | `SLM_BASE_URL` empty. Health shows `slm.configured:false` |
+| 502 `SLM_UNAVAILABLE` "does not serve model" (HTTP 404) | Wrong API style: an OpenAI-style host (Groq, OpenRouter, ...) needs `SLM_PROVIDER=openai-compatible` and a base URL ending in `/v1`; or the model id is wrong/retired |
 | 502 `SLM_UNAVAILABLE` | Endpoint unreachable from Vercel (localhost/private IP/firewall), wrong token, or model not pulled (`ollama pull gemma3:4b`). Run `/api/health?deep=1` |
 | 504 `SLM_TIMEOUT` | Cold model load or CPU inference; keep model warm (`OLLAMA_KEEP_ALIVE=24h`) or raise `SLM_TIMEOUT_MS` (≤ 50000) |
 | 502 `SLM_BAD_RESPONSE` / 400 on text input | Model returned non-JSON, or email not present verbatim in the text. Resend or use structured JSON |

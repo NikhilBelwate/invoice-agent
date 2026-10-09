@@ -226,3 +226,34 @@ test('end to end: text -> Gemma (mock) -> calculation -> real PDF -> SMTP (mock)
   assert.equal(message.attachments[0].content.subarray(0, 5).toString(), '%PDF-');
   assert.match(message.attachments[0].filename, /^invoice-INV-\d{8}-[0-9A-F]{8}-[0-9a-f]{8}\.pdf$/);
 });
+
+// ---- OpenAI-compatible provider ----------------------------------------------------------------
+const openaiCfg = makeConfig({ SLM_PROVIDER: 'openai-compatible', SLM_BASE_URL: 'https://api.example.com/openai/v1', SLM_MODEL: 'gemma-x' });
+const openaiReply = (obj) => async () => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(obj) } }] }), { status: 200 });
+
+test('openai-compatible: calls /chat/completions with bearer auth + json mode and parses choices[0]', async () => {
+  let seen;
+  const fetchImpl = async (url, init) => { seen = { url, body: JSON.parse(init.body), auth: init.headers.Authorization }; return openaiReply(goodExtraction)(); };
+  const data = await extractInvoiceData(TEXT, openaiCfg.slm, { fetchImpl });
+  assert.equal(seen.url, 'https://api.example.com/openai/v1/chat/completions');
+  assert.equal(seen.body.model, 'gemma-x');
+  assert.deepEqual(seen.body.response_format, { type: 'json_object' });
+  assert.equal(seen.auth, 'Bearer slm-secret');
+  assert.equal(data.email, 'john@example.com');
+});
+
+test('openai-compatible: retries once without response_format on HTTP 400', async () => {
+  const bodies = [];
+  const fetchImpl = async (url, init) => {
+    bodies.push(JSON.parse(init.body));
+    return bodies.length === 1 ? new Response('unsupported', { status: 400 }) : openaiReply(goodExtraction)();
+  };
+  const data = await extractInvoiceData(TEXT, openaiCfg.slm, { fetchImpl });
+  assert.equal(bodies.length, 2);
+  assert.equal(bodies[1].response_format, undefined);
+  assert.equal(data.currency, 'INR');
+});
+
+test('unknown SLM_PROVIDER => SLM_NOT_CONFIGURED', async () => {
+  await assert.rejects(extractInvoiceData(TEXT, { ...openaiCfg.slm, provider: 'carrier-pigeon' }), (e) => e.code === 'SLM_NOT_CONFIGURED');
+});
