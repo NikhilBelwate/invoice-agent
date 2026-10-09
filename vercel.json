@@ -1,4 +1,8 @@
 {
+  "framework": null,
+  "buildCommand": "",
+  "installCommand": "npm install",
+  "outputDirectory": "public",
   "functions": {
     "api/invoices.js": {
       "maxDuration": 60,
@@ -14,8 +18,14 @@
     {
       "source": "/api/(.*)",
       "headers": [
-        { "key": "Cache-Control", "value": "no-store" },
-        { "key": "X-Content-Type-Options", "value": "nosniff" }
+        {
+          "key": "Cache-Control",
+          "value": "no-store"
+        },
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        }
       ]
     }
   ]
