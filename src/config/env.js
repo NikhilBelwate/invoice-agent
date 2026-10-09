@@ -26,6 +26,7 @@ const schema = z.object({
   RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(1).max(10000).default(20),
   UPSTASH_REDIS_REST_URL: z.string().url().optional(),
   UPSTASH_REDIS_REST_TOKEN: z.string().optional(),
+  PUBLIC_BASE_URL: z.string().url().optional(),
   BUSINESS_NAME: z.string().optional(),
   BUSINESS_EMAIL: z.string().optional(),
   BUSINESS_ADDRESS: z.string().optional(),

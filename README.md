@@ -7,12 +7,14 @@ POST /api/invoices ─► auth ─► rate limit ─► body-size/Zod validation
                        ├─ {input:"text"} ─► Gemma (Ollama-compatible) ─► Zod validate (untrusted)
                        └─ structured JSON ─────────────────────────────► Zod validate (no SLM call)
                      ─► calculate + verify totals (decimal.js) ─► PDF (Buffer) ─► SMTP submit ─► JSON response
+POST /api/a2a ─► same pipeline, exposed as A2A tasks (see §5b); GET /.well-known/agent-card.json ─► discovery
 GET  /api/health ─► configuration status (no secrets)
 ```
 
 | Layer | Files |
 |---|---|
-| Vercel handlers (thin) | `api/invoices.js`, `api/health.js`, `api/_http.js` (auth, body reading, errors) |
+| Vercel handlers (thin) | `api/invoices.js`, `api/a2a.js`, `api/agent-card.js`, `api/health.js`, `api/_http.js` (auth, body reading, errors) |
+| A2A layer | `src/a2a/{protocol,server,executor,taskStore,agentCard}.js` — no Vercel imports |
 | Orchestration | `src/agents/invoiceAgent.js` — no Vercel imports; testable locally |
 | Services | `src/services/{slmService,invoiceCalculationService,pdfService,emailService,stateStore}.js` |
 | Validation / config / utils | `src/validators/invoiceValidator.js`, `src/config/env.js`, `src/utils/{money,invoiceNumber,errors}.js` |
@@ -52,6 +54,7 @@ npm run dev               # = vercel dev  (serves http://localhost:3000/api/...)
 | `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` | Recommended | — | Shared state for rate limits + idempotency |
 | `RATE_LIMIT_PER_MINUTE` | No | `20` | Per client (API key + IP) |
 | `MAX_BODY_BYTES` | No | `102400` | Hard request-size cap (413) |
+| `PUBLIC_BASE_URL` | Recommended for A2A | derived from request | Origin advertised in the Agent Card |
 | `BUSINESS_NAME`, `BUSINESS_EMAIL`, `BUSINESS_ADDRESS` | No | — | Printed on the PDF |
 | `NODE_ENV` | No | `development` | Vercel sets `production` for production deployments |
 
@@ -145,6 +148,72 @@ curl https://YOUR-APP.vercel.app/api/health
 curl -H "x-api-key: $API_KEY" "https://YOUR-APP.vercel.app/api/health?deep=1"   # also probes the SLM endpoint + model
 ```
 
+## 5b. A2A protocol (agent-to-agent)
+
+Other agents can discover and call this agent over [A2A](https://a2a-protocol.org) (JSON-RPC binding). Both **1.0** and **0.3** wire formats are served from one endpoint; the response format follows the method name the caller used.
+
+| | |
+|---|---|
+| Agent Card | `GET /.well-known/agent-card.json` (also `/.well-known/agent.json`) — public, no secrets, lists skill `generate-and-email-invoice` |
+| Endpoint | `POST /api/a2a` — header `x-api-key`, optional `A2A-Version: 1.0` or `0.3` |
+| 1.0 methods | `SendMessage`, `GetTask`, `CancelTask` |
+| 0.3 methods | `message/send`, `tasks/get`, `tasks/cancel` |
+| Not supported (declared `false` in the card) | streaming (`SendStreamingMessage`, `message/stream`, subscribe/resubscribe), push notifications, `ListTasks`, extended card — each returns its specific A2A error |
+
+Set `PUBLIC_BASE_URL` (e.g. `https://invoice-agent.omega-x.com`) so the card advertises the right origin; otherwise it is derived from the request host.
+
+**Input.** Send a *data part* with the structured invoice (`customerName, email, currency, items[], taxPercentage, discount?, ...`) or a *text part* with the purchase description (this uses the language model). File parts are rejected (`-32005`).
+
+**Task states.** The call blocks until the work is done (a few seconds) and returns a Task:
+
+| State | When | What the caller gets |
+|---|---|---|
+| `completed` | PDF generated and SMTP accepted the email | artifact `invoice-summary` (data part with amounts, invoice number, flags) |
+| `input-required` | missing/invalid email or products, bad currency, or supplied totals that don't match | agent message explaining each problem. **Reply with another message carrying the same `taskId`** containing the missing/corrected fields (data parts are merged, text is appended). Pending input expires after 1 h |
+| `failed` | model, PDF, SMTP, config or unexpected error | agent message + data part `{ "error": "<CODE>", "retryable": true|false }`. Nothing was emailed unless the message says the outcome is unknown |
+| `canceled` | `CancelTask` on an `input-required` task | — (completed/failed tasks return `TaskNotCancelableError`; cancel is idempotent) |
+
+Business-level problems are task states, not protocol errors; JSON-RPC errors are reserved for protocol problems.
+
+**Exactly-once sending.** `message.messageId` is the idempotency key: re-delivering the same `messageId` returns the original task and never emails twice. A `failed` task releases its `messageId`, so the same message can be retried. A task stuck in `working` for more than 150 s (function timeout) is reported as `failed` with `PROCESSING_INTERRUPTED` — *the email outcome is then unknown; check before retrying*. Tasks are kept 24 h in Upstash Redis; **without Upstash they live in per-instance memory and `GetTask` may miss them** across serverless instances.
+
+### Error codes (JSON-RPC `error.code`)
+
+| Code | Meaning | HTTP |
+|---|---|---|
+| -32700 | Invalid JSON | 400 |
+| -32600 | Invalid request (batch, missing jsonrpc/id/method, wrong content type, non-POST) | 400 / 415 / 405 |
+| -32601 / -32602 / -32603 | Method not found / invalid params (bad message, role, parts, ids, historyLength) / internal (also: task storage unavailable, `data.retryable:true`) | 200 |
+| -32001 | TaskNotFound (unknown or expired) | 200 |
+| -32002 | TaskNotCancelable | 200 |
+| -32003 | PushNotificationNotSupported | 200 |
+| -32004 | UnsupportedOperation (streaming/list; follow-up to a finished or busy task; messageId in flight) | 200 |
+| -32005 | ContentTypeNotSupported (file parts, unusable `acceptedOutputModes`) | 200 |
+| -32007 | ExtendedAgentCardNotConfigured | 200 |
+| -32009 | VersionNotSupported (`A2A-Version` other than 0.3 / 1.0) | 200 |
+| -32020 / -32021 / -32022 | Unauthorized / rate limited (`Retry-After`) / payload too large (server-defined) | 401 / 429 / 413 |
+
+### Example (1.0)
+
+```bash
+curl -sS https://YOUR-APP.vercel.app/api/a2a -H "content-type: application/json" -H "x-api-key: $API_KEY" -H "A2A-Version: 1.0" -d '{
+  "jsonrpc":"2.0","id":1,"method":"SendMessage",
+  "params":{"message":{"messageId":"order-8841-v1","role":"ROLE_USER","parts":[
+    {"data":{"customerName":"John Smith","email":"john@example.com","currency":"CAD",
+             "items":[{"name":"Laptop","quantity":2,"unitPrice":50000}],"taxPercentage":11}}]}}}'
+```
+
+```json
+{"jsonrpc":"2.0","id":1,"result":{"task":{"id":"7b0c…","contextId":"3f9a…",
+  "status":{"state":"TASK_STATE_COMPLETED","timestamp":"2026-10-09T12:00:00.000Z",
+            "message":{"messageId":"…","role":"ROLE_AGENT","parts":[{"text":"Invoice INV-… generated (CAD 111000) and submitted to the SMTP server. SMTP acceptance does not confirm inbox delivery."}]}},
+  "artifacts":[{"artifactId":"…","name":"invoice-summary","parts":[{"data":{"invoiceNumber":"INV-…","grandTotal":111000,"emailSubmitted":true},"mediaType":"application/json"}]}]}}}
+```
+
+0.3 equivalent: `"method":"message/send"`, `"role":"user"`, parts as `{"kind":"data","data":{…}}`; the result is the Task itself (`"kind":"task"`, state `"completed"`).
+
+Verify discovery after deploying: `curl https://YOUR-APP.vercel.app/.well-known/agent-card.json`.
+
 ## 6. Calculation & rounding policy
 
 line total = `round(qty × unitPrice)`; subtotal = Σ line totals; discount (percentage or fixed) is applied to the subtotal; tax = `round((subtotal − discount) × rate)` (tax **after** discount); grand total = subtotal − discount + tax. Rounding is ROUND_HALF_UP to the currency's minor unit (JPY/KRW/VND… 0, KWD/BHD/OMR… 3, default 2). Supplied totals must match within one minor unit or the request fails with 422. The SLM never calculates anything; amounts it copies from text are only *checked*.
@@ -161,7 +230,7 @@ line total = `round(qty × unitPrice)`; subtotal = Σ line totals; discount (per
 ## 8. Tests
 
 ```bash
-npm test                  # 59 mocked tests: calc, validation, SLM failures/timeouts, SMTP/PDF failures,
+npm test                  # 90 mocked tests: calc, validation, SLM failures/timeouts, SMTP/PDF failures,
                           # idempotency, handlers (auth, limits, health), env/production config, e2e
 ```
 

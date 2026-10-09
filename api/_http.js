@@ -74,6 +74,6 @@ export async function readJsonBody(req, maxBytes) {
   try {
     return JSON.parse(raw);
   } catch {
-    throw new AppError('VALIDATION_ERROR', 'Request body is not valid JSON.', 400);
+    throw Object.assign(new AppError('VALIDATION_ERROR', 'Request body is not valid JSON.', 400), { kind: 'invalid_json' });
   }
 }

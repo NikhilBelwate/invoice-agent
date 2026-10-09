@@ -12,6 +12,15 @@
     "api/health.js": {
       "maxDuration": 10,
       "memory": 256
+    },
+    "api/a2a.js": {
+      "maxDuration": 60,
+      "memory": 1024,
+      "includeFiles": "node_modules/pdfkit/js/data/**"
+    },
+    "api/agent-card.js": {
+      "maxDuration": 10,
+      "memory": 256
     }
   },
   "headers": [
@@ -27,6 +36,16 @@
           "value": "nosniff"
         }
       ]
+    }
+  ],
+  "rewrites": [
+    {
+      "source": "/.well-known/agent-card.json",
+      "destination": "/api/agent-card"
+    },
+    {
+      "source": "/.well-known/agent.json",
+      "destination": "/api/agent-card"
     }
   ]
 }
