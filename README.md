@@ -13,7 +13,8 @@ GET  /api/health ─► configuration status (no secrets)
 
 | Layer | Files |
 |---|---|
-| Vercel handlers (thin) | `api/invoices.js`, `api/a2a.js`, `api/agent-card.js`, `api/health.js`, `api/_http.js` (auth, body reading, errors) |
+| Vercel handlers (thin) | `api/invoices.js`, `api/a2a.js`, `api/mcp.js`, `api/agent-card.js`, `api/health.js`, `api/_http.js` (auth, body reading, errors) |
+| MCP layer | `src/mcp/{protocol,server,tools}.js`, shared helper `src/agents/invoicePipeline.js` |
 | A2A layer | `src/a2a/{protocol,server,executor,taskStore,agentCard}.js` — no Vercel imports |
 | Orchestration | `src/agents/invoiceAgent.js` — no Vercel imports; testable locally |
 | Services | `src/services/{slmService,invoiceCalculationService,pdfService,emailService,stateStore}.js` |
@@ -54,6 +55,7 @@ npm run dev               # = vercel dev  (serves http://localhost:3000/api/...)
 | `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` | Recommended | — | Shared state for rate limits + idempotency |
 | `RATE_LIMIT_PER_MINUTE` | No | `20` | Per client (API key + IP) |
 | `MAX_BODY_BYTES` | No | `102400` | Hard request-size cap (413) |
+| `MCP_ALLOWED_ORIGINS` | No | — | Extra browser origins allowed to call `/api/mcp` |
 | `PUBLIC_BASE_URL` | Recommended for A2A | derived from request | Origin advertised in the Agent Card |
 | `BUSINESS_NAME`, `BUSINESS_EMAIL`, `BUSINESS_ADDRESS` | No | — | Printed on the PDF |
 | `NODE_ENV` | No | `development` | Vercel sets `production` for production deployments |
@@ -214,6 +216,57 @@ curl -sS https://YOUR-APP.vercel.app/api/a2a -H "content-type: application/json"
 
 Verify discovery after deploying: `curl https://YOUR-APP.vercel.app/.well-known/agent-card.json`.
 
+## 5c. MCP (Model Context Protocol)
+
+AI clients (Claude Code, Cursor, MCP Inspector, agent frameworks) can use this agent as an MCP server over **Streamable HTTP**.
+
+| | |
+|---|---|
+| Endpoint | `POST /api/mcp` (also `/mcp`) — stateless: no sessions, no SSE; `GET`/`DELETE` return 405 |
+| Auth | `x-api-key: <API_KEY>` **or** `Authorization: Bearer <API_KEY>` (static key; OAuth is not implemented) |
+| Protocol versions | **Legacy** 2025-03-26 / 2025-06-18 / 2025-11-25 (`initialize` handshake) **and modern** 2026-07-28 (`server/discover`, per-request `_meta`, `MCP-Protocol-Version` / `Mcp-Method` / `Mcp-Name` headers). The era is detected per request |
+| Browser safety | A browser `Origin` must be the same host or listed in `MCP_ALLOWED_ORIGINS` (comma-separated); otherwise 403. Non-browser clients send no Origin |
+
+### Tools
+
+| Tool | Does | Returns |
+|---|---|---|
+| `generate_invoice_pdf` | Validate → (extract text with the SLM) → calculate → render the PDF. **Sends no email** | text summary, an embedded `application/pdf` resource (base64 `blob`), `structuredContent` (invoiceNumber, totals, filename, sizeBytes) |
+| `send_invoice_email` | Same steps, then emails the PDF to the invoice's customer email (the only possible recipient) | `structuredContent.emailSubmitted` (SMTP accepted — not inbox delivery). Optional `idempotencyKey` (8–128 chars): repeating it returns the first result and sends no second email |
+
+Arguments for both: either `input` (plain text) **or** structured fields (`customerName, email, currency, items[], taxPercentage, discount, invoiceNumber, invoiceDate, paymentStatus, notes, subtotal, taxAmount, grandTotal`) — same rules as the REST API. Tool annotations: `generate_invoice_pdf` is read-only; `send_invoice_email` is not read-only, not destructive, not idempotent (so clients can ask the user to confirm).
+
+### Errors
+
+* **Tool execution errors** are normal results with `isError: true` so the model can self-correct: validation problems and total mismatches (listed field by field), model/PDF/SMTP failures. `structuredContent` is `{ error, retryable, details? }`.
+* **Protocol errors** are JSON-RPC errors: `-32700` bad JSON (HTTP 400), `-32600` invalid request (400/415/405/403), `-32601` unknown method (404 in the modern era), `-32602` unknown tool / bad params / missing `_meta` (400 in the modern era), `-32020` header mismatch (400), `-32022` unsupported version with `data.supported` (400), `-32603` internal.
+* Transport: 401 (`-31401`, `WWW-Authenticate: Bearer`), 413 (`-31413`), 429 (`-31429`, `Retry-After`), 503 when production has no `API_KEY`. These `-314xx` codes are application-defined.
+
+### Connect a client
+
+```bash
+# Claude Code
+claude mcp add --transport http invoice-agent https://YOUR-APP.vercel.app/api/mcp --header "Authorization: Bearer $API_KEY"
+
+# MCP Inspector
+npx @modelcontextprotocol/inspector   # transport: Streamable HTTP, URL: https://YOUR-APP.vercel.app/api/mcp, header Authorization: Bearer <key>
+```
+
+Raw check (legacy handshake, then list tools):
+
+```bash
+curl -sS https://YOUR-APP.vercel.app/api/mcp -H "content-type: application/json" -H "authorization: Bearer $API_KEY"   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'
+curl -sS https://YOUR-APP.vercel.app/api/mcp -H "content-type: application/json" -H "authorization: Bearer $API_KEY" -H "mcp-protocol-version: 2025-06-18"   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+```
+
+Generate a PDF from plain text (no email is sent):
+
+```bash
+curl -sS https://YOUR-APP.vercel.app/api/mcp -H "content-type: application/json" -H "authorization: Bearer $API_KEY" -H "mcp-protocol-version: 2025-06-18"   -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"generate_invoice_pdf","arguments":{"input":"Invoice for John Smith, john@example.com, 2 laptops at 50000 INR each, 18% tax."}}}'
+```
+
+Email it (real send): same call with `"name":"send_invoice_email"` and an `idempotencyKey`. Note: claude.ai's web connector UI requires OAuth (or no auth), which this static-key server does not provide.
+
 ## 6. Calculation & rounding policy
 
 line total = `round(qty × unitPrice)`; subtotal = Σ line totals; discount (percentage or fixed) is applied to the subtotal; tax = `round((subtotal − discount) × rate)` (tax **after** discount); grand total = subtotal − discount + tax. Rounding is ROUND_HALF_UP to the currency's minor unit (JPY/KRW/VND… 0, KWD/BHD/OMR… 3, default 2). Supplied totals must match within one minor unit or the request fails with 422. The SLM never calculates anything; amounts it copies from text are only *checked*.
@@ -230,7 +283,7 @@ line total = `round(qty × unitPrice)`; subtotal = Σ line totals; discount (per
 ## 8. Tests
 
 ```bash
-npm test                  # 90 mocked tests: calc, validation, SLM failures/timeouts, SMTP/PDF failures,
+npm test                  # 138 mocked tests: calc, validation, SLM failures/timeouts, SMTP/PDF failures,
                           # idempotency, handlers (auth, limits, health), env/production config, e2e
 ```
 

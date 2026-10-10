@@ -28,6 +28,7 @@ const schema = z.object({
   UPSTASH_REDIS_REST_URL: z.string().url().optional(),
   UPSTASH_REDIS_REST_TOKEN: z.string().optional(),
   PUBLIC_BASE_URL: z.string().url().optional(),
+  MCP_ALLOWED_ORIGINS: z.string().optional(),
   BUSINESS_NAME: z.string().optional(),
   BUSINESS_EMAIL: z.string().optional(),
   BUSINESS_ADDRESS: z.string().optional(),

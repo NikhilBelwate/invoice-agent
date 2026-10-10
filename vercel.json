@@ -21,6 +21,11 @@
     "api/agent-card.js": {
       "maxDuration": 10,
       "memory": 256
+    },
+    "api/mcp.js": {
+      "maxDuration": 60,
+      "memory": 1024,
+      "includeFiles": "node_modules/pdfkit/js/data/**"
     }
   },
   "headers": [
@@ -46,6 +51,10 @@
     {
       "source": "/.well-known/agent.json",
       "destination": "/api/agent-card"
+    },
+    {
+      "source": "/mcp",
+      "destination": "/api/mcp"
     }
   ]
 }
